@@ -1,0 +1,24 @@
+# Ignore Python virtual environments
+venv/
+.env/
+.env.*          # for things like .env.dev, .env.prod
+
+# Bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# VSCode or IDE
+.vscode/
+.idea/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment and secrets
+*.env
+*.env.*

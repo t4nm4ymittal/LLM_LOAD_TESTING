@@ -1,0 +1,69 @@
+{
+  "metadata": {
+    "generated_at": "2025-08-03T17:16:41.297000",
+    "total_requests": 5,
+    "generation_stats": {
+      "total": 5,
+      "methods": {
+        "POST": 5
+      },
+      "has_headers": 0,
+      "has_body": 5,
+      "unique_urls": 1,
+      "avg_headers_per_request": 0,
+      "unique_domains": 1
+    }
+  },
+  "requests": [
+    {
+      "method": "POST",
+      "url": "https://jsonplaceholder.typicode.com/posts",
+      "headers": {},
+      "body": {
+        "title": "My First Post",
+        "body": "This is a sample post content.",
+        "userId": 5
+      }
+    },
+    {
+      "method": "POST",
+      "url": "https://jsonplaceholder.typicode.com/posts",
+      "headers": {},
+      "body": {
+        "title": "Updated Title",
+        "body": "Here's some new information for the post.",
+        "userId": 12
+      }
+    },
+    {
+      "method": "POST",
+      "url": "https://jsonplaceholder.typicode.com/posts",
+      "headers": {},
+      "body": {
+        "title": "Announcement",
+        "body": "We are launching a new feature soon.",
+        "userId": 7
+      }
+    },
+    {
+      "method": "POST",
+      "url": "https://jsonplaceholder.typicode.com/posts",
+      "headers": {},
+      "body": {
+        "title": "Event Update",
+        "body": "The event has been rescheduled to next month.",
+        "userId": 3
+      }
+    },
+    {
+      "method": "POST",
+      "url": "https://jsonplaceholder.typicode.com/posts",
+      "headers": {},
+      "body": {
+        "title": "Feedback",
+        "body": "Great service, keep it up!",
+        "userId": 9
+      }
+    }
+  ]
+}

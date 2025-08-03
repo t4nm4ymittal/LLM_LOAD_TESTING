@@ -1,0 +1,41 @@
+[
+  {
+    "method": "POST",
+    "url": "https://jsonplaceholder.typicode.com/users",
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "body": "{\"name\": \"John Doe\", \"username\": \"johndoe\", \"email\": \"john@example.com\"}"
+  },
+  {
+    "method": "POST",
+    "url": "https://jsonplaceholder.typicode.com/users",
+    "headers": {
+      "Authorization": "Bearer sampletoken123"
+    },
+    "body": "{\"name\": \"Jane Smith\", \"username\": \"janesmith\", \"email\": \"jane@example.com\"}"
+  },
+  {
+    "method": "POST",
+    "url": "https://jsonplaceholder.typicode.com/users",
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "body": "{\"name\": \"Alice Johnson\", \"username\": \"alicej\", \"email\": \"alice@example.com\"}"
+  },
+  {
+    "method": "POST",
+    "url": "https://jsonplaceholder.typicode.com/users",
+    "headers": {
+      "Content-Type": "application/json",
+      "X-Custom-Header": "LoadTest"
+    },
+    "body": "{\"name\": \"Bob Brown\", \"username\": \"bobb\", \"email\": \"bob@example.com\"}"
+  },
+  {
+    "method": "POST",
+    "url": "https://jsonplaceholder.typicode.com/users",
+    "headers": {},
+    "body": "{\"name\": \"Charlie Davis\", \"username\": \"charlied\", \"email\": \"charlie@example.com\"}"
+  }
+]
