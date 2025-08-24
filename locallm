@@ -1,0 +1,367 @@
+#!/usr/bin/env python3
+"""
+MCP Server Wrapper for Local LLM Integration
+This wrapper connects your existing MCP server to a local LLM without modifying the server
+"""
+
+import asyncio
+import json
+import subprocess
+import requests
+import logging
+from typing import Dict, List, Any, Optional
+from dataclasses import dataclass
+import sys
+import os
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("mcp-llm-wrapper")
+
+@dataclass
+class MCPTool:
+    """Represents an MCP tool"""
+    name: str
+    description: str
+    input_schema: Dict[str, Any]
+
+class LocalLLMClient:
+    """Client for local LLM (Ollama)"""
+    
+    def __init__(self, model_name: str = "sqlcoder:7b", base_url: str = "http://localhost:11434"):
+        self.model_name = model_name
+        self.base_url = base_url
+    
+    def is_available(self) -> bool:
+        """Check if Ollama is running"""
+        try:
+            response = requests.get(f"{self.base_url}/api/tags", timeout=5)
+            return response.status_code == 200
+        except:
+            return False
+    
+    def generate_tool_call(self, user_prompt: str, available_tools: List[MCPTool], 
+                          schema_context: str = "") -> Optional[Dict[str, Any]]:
+        """Generate MCP tool call from user prompt"""
+        
+        # Build tool descriptions for the LLM
+        tools_desc = "Available tools:\n"
+        for tool in available_tools:
+            tools_desc += f"- {tool.name}: {tool.description}\n"
+            if 'properties' in tool.input_schema:
+                tools_desc += "  Parameters:\n"
+                for param, details in tool.input_schema['properties'].items():
+                    required = param in tool.input_schema.get('required', [])
+                    tools_desc += f"    - {param}: {details.get('description', '')} {'(required)' if required else '(optional)'}\n"
+        
+        system_prompt = f"""You are an expert at converting natural language requests into structured tool calls.
+
+{tools_desc}
+
+{f"Database Schema Context: {schema_context}" if schema_context else ""}
+
+IMPORTANT:
+- Respond with ONLY a JSON object containing the tool call
+- Format: {{"tool_name": "tool_name", "parameters": {{"param1": "value1"}}}}
+- If the request is for database queries, generate the SQL query parameter
+- For execute_sql_query tool, put the SQL in the "query" parameter
+- No explanations, just the JSON
+
+Examples:
+User: "Show me all employees"
+Response: {{"tool_name": "execute_sql_query", "parameters": {{"query": "SELECT * FROM employees"}}}}
+
+User: "Find products with price over 100"
+Response: {{"tool_name": "execute_sql_query", "parameters": {{"query": "SELECT * FROM products WHERE price > 100"}}}}"""
+
+        payload = {
+            "model": self.model_name,
+            "prompt": f"{system_prompt}\n\nUser Request: {user_prompt}\n\nTool Call JSON:",
+            "stream": False,
+            "options": {
+                "temperature": 0.1,
+                "top_p": 0.9,
+                "stop": ["\n\n", "User:", "Explanation:"]
+            }
+        }
+        
+        try:
+            response = requests.post(
+                f"{self.base_url}/api/generate",
+                json=payload,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                response_text = result['response'].strip()
+                
+                # Clean and parse JSON
+                response_text = response_text.replace('```json', '').replace('```', '')
+                response_text = response_text.strip()
+                
+                try:
+                    return json.loads(response_text)
+                except json.JSONDecodeError:
+                    logger.error(f"Failed to parse LLM response as JSON: {response_text}")
+                    return None
+                    
+        except Exception as e:
+            logger.error(f"LLM generation error: {e}")
+            return None
+        
+        return None
+
+class MCPServerWrapper:
+    """Wrapper that connects local LLM to existing MCP server"""
+    
+    def __init__(self, server_script_path: str, llm_model: str = "sqlcoder:7b"):
+        self.server_script_path = server_script_path
+        self.llm_client = LocalLLMClient(llm_model)
+        self.mcp_process = None
+        self.available_tools = []
+        self.schema_cache = ""
+    
+    async def start_mcp_server(self):
+        """Start the MCP server as a subprocess"""
+        try:
+            self.mcp_process = await asyncio.create_subprocess_exec(
+                sys.executable, self.server_script_path,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            logger.info(f"✅ MCP Server started: {self.server_script_path}")
+            
+            # Initialize connection and get available tools
+            await self.initialize_mcp_connection()
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to start MCP server: {e}")
+            raise
+    
+    async def initialize_mcp_connection(self):
+        """Initialize MCP connection and discover available tools"""
+        # Send initialize request
+        init_request = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {
+                    "tools": {}
+                },
+                "clientInfo": {
+                    "name": "mcp-llm-wrapper",
+                    "version": "1.0.0"
+                }
+            }
+        }
+        
+        await self.send_mcp_request(init_request)
+        
+        # Get available tools
+        tools_request = {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {}
+        }
+        
+        response = await self.send_mcp_request(tools_request)
+        
+        if response and 'result' in response and 'tools' in response['result']:
+            self.available_tools = [
+                MCPTool(
+                    name=tool['name'],
+                    description=tool['description'],
+                    input_schema=tool['inputSchema']
+                )
+                for tool in response['result']['tools']
+            ]
+            logger.info(f"✅ Discovered {len(self.available_tools)} MCP tools")
+            
+            # Try to get schema information if available
+            await self.load_schema_context()
+    
+    async def load_schema_context(self):
+        """Try to load database schema context"""
+        # Look for schema-related tools
+        for tool in self.available_tools:
+            if 'schema' in tool.name.lower() or 'describe' in tool.name.lower():
+                try:
+                    schema_request = {
+                        "jsonrpc": "2.0",
+                        "id": 100,
+                        "method": "tools/call",
+                        "params": {
+                            "name": tool.name,
+                            "arguments": {}
+                        }
+                    }
+                    
+                    response = await self.send_mcp_request(schema_request)
+                    if response and 'result' in response:
+                        self.schema_cache = str(response['result'])
+                        logger.info("✅ Loaded database schema context")
+                        break
+                except:
+                    continue
+    
+    async def send_mcp_request(self, request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Send request to MCP server and get response"""
+        if not self.mcp_process:
+            return None
+        
+        try:
+            # Send request
+            request_json = json.dumps(request) + '\n'
+            self.mcp_process.stdin.write(request_json.encode())
+            await self.mcp_process.stdin.drain()
+            
+            # Read response
+            response_line = await self.mcp_process.stdout.readline()
+            if response_line:
+                return json.loads(response_line.decode().strip())
+                
+        except Exception as e:
+            logger.error(f"MCP communication error: {e}")
+            return None
+        
+        return None
+    
+    async def process_user_query(self, user_prompt: str) -> str:
+        """Process user query end-to-end"""
+        logger.info(f"🔍 Processing: {user_prompt}")
+        
+        # Check LLM availability
+        if not self.llm_client.is_available():
+            return "❌ Local LLM (Ollama) is not available. Please start it with: ollama serve"
+        
+        # Generate tool call using LLM
+        tool_call = self.llm_client.generate_tool_call(
+            user_prompt, 
+            self.available_tools,
+            self.schema_cache
+        )
+        
+        if not tool_call:
+            return "❌ Failed to generate tool call from your prompt"
+        
+        logger.info(f"🤖 Generated tool call: {tool_call}")
+        
+        # Execute tool via MCP server
+        mcp_request = {
+            "jsonrpc": "2.0",
+            "id": 999,
+            "method": "tools/call",
+            "params": {
+                "name": tool_call.get("tool_name"),
+                "arguments": tool_call.get("parameters", {})
+            }
+        }
+        
+        response = await self.send_mcp_request(mcp_request)
+        
+        if not response:
+            return "❌ No response from MCP server"
+        
+        if 'error' in response:
+            return f"❌ MCP Error: {response['error']['message']}"
+        
+        if 'result' in response:
+            # Format the response
+            result_text = ""
+            if isinstance(response['result'], list):
+                for item in response['result']:
+                    if isinstance(item, dict) and 'text' in item:
+                        result_text += item['text'] + "\n"
+            else:
+                result_text = str(response['result'])
+            
+            return f"""🔍 Your Query: {user_prompt}
+🤖 Tool Used: {tool_call.get("tool_name")}
+📊 Result:
+
+{result_text}"""
+        
+        return "❌ Unexpected response format from MCP server"
+    
+    async def stop(self):
+        """Stop the MCP server"""
+        if self.mcp_process:
+            self.mcp_process.terminate()
+            await self.mcp_process.wait()
+            logger.info("MCP Server stopped")
+
+async def interactive_mode(wrapper: MCPServerWrapper):
+    """Run interactive mode"""
+    print("🤖 MCP + Local LLM Wrapper Ready!")
+    print("Type your queries in natural language (or 'quit' to exit)")
+    print("Examples:")
+    print("  - Show me all employees")
+    print("  - Find orders from last month")
+    print("  - List products by category")
+    print("-" * 50)
+    
+    while True:
+        try:
+            user_input = input("\n🔍 Your query: ").strip()
+            
+            if user_input.lower() in ['quit', 'exit', 'q']:
+                print("👋 Goodbye!")
+                break
+            
+            if not user_input:
+                continue
+            
+            # Process query
+            result = await wrapper.process_user_query(user_input)
+            print("\n" + result)
+            
+        except KeyboardInterrupt:
+            print("\n👋 Goodbye!")
+            break
+        except Exception as e:
+            print(f"❌ Error: {e}")
+
+async def main():
+    """Main function"""
+    if len(sys.argv) < 2:
+        print("Usage: python mcp_llm_wrapper.py <path_to_your_server.py> [model_name]")
+        print("Example: python mcp_llm_wrapper.py ./server.py sqlcoder:7b")
+        sys.exit(1)
+    
+    server_path = sys.argv[1]
+    model_name = sys.argv[2] if len(sys.argv) > 2 else "sqlcoder:7b"
+    
+    if not os.path.exists(server_path):
+        print(f"❌ Server file not found: {server_path}")
+        sys.exit(1)
+    
+    # Create wrapper
+    wrapper = MCPServerWrapper(server_path, model_name)
+    
+    try:
+        # Start MCP server
+        await wrapper.start_mcp_server()
+        
+        # Check LLM availability
+        if not wrapper.llm_client.is_available():
+            print("⚠️  Warning: Ollama not running. Start it with:")
+            print("   ollama serve")
+            print(f"   ollama pull {model_name}")
+            return
+        
+        # Run interactive mode
+        await interactive_mode(wrapper)
+        
+    except Exception as e:
+        logger.error(f"Wrapper error: {e}")
+        print(f"❌ Failed to start wrapper: {e}")
+        
+    finally:
+        await wrapper.stop()
+
+if __name__ == "__main__":
+    asyncio.run(main())
