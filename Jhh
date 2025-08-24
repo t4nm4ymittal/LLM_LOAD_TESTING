@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+“””
+MCP Client that connects your Oracle MCP server with Hugging Face models
+“””
+
+import asyncio
+import json
+import subprocess
+import sys
+from typing import Dict, List, Any
+from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+import torch
+
+class MCPClient:
+def **init**(self, model_name: str = “microsoft/DialoGPT-medium”):
+“”“Initialize the MCP client with a Hugging Face model”””
+self.model_name = model_name
+self.server_process = None
+self.tools = {}
+
+```
+    # Initialize Hugging Face model
+    print(f"Loading model: {model_name}")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    self.generator = pipeline(
+        "text-generation",
+        model=model_name,
+        tokenizer=model_name,
+        device=device,
+        torch_dtype=torch.float16 if device == "cuda" else torch.float32
+    )
+    print(f"Model loaded on {device}")
+
+async def start_mcp_server(self, server_path: str):
+    """Start your MCP server"""
+    try:
+        self.server_process = await asyncio.create_subprocess_exec(
+            sys.executable, server_path,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        # Initialize connection
+        init_message = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {
+                    "tools": {}
+                },
+                "clientInfo": {
+                    "name": "HuggingFace-MCP-Client",
+                    "version": "1.0.0"
+                }
+            }
+        }
+        
+        await self.send_message(init_message)
+        response = await self.receive_message()
+        
+        # Get available tools
+        tools_message = {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list"
+        }
+        
+        await self.send_message(tools_message)
+        tools_response = await self.receive_message()
+        
+        if "result" in tools_response:
+            self.tools = {tool["name"]: tool for tool in tools_response["result"]["tools"]}
+            print(f"Available tools: {list(self.tools.keys())}")
+        
+        return True
+        
+    except Exception as e:
+        print(f"Error starting MCP server: {e}")
+        return False
+
+async def send_message(self, message: Dict):
+    """Send a message to the MCP server"""
+    if self.server_process and self.server_process.stdin:
+        message_str = json.dumps(message) + "\n"
+        self.server_process.stdin.write(message_str.encode())
+        await self.server_process.stdin.drain()
+
+async def receive_message(self) -> Dict:
+    """Receive a message from the MCP server"""
+    if self.server_process and self.server_process.stdout:
+        line = await self.server_process.stdout.readline()
+        return json.loads(line.decode().strip())
+    return {}
+
+async def call_tool(self, tool_name: str, arguments: Dict) -> Dict:
+    """Call a specific tool on the MCP server"""
+    message = {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": tool_name,
+            "arguments": arguments
+        }
+    }
+    
+    await self.send_message(message)
+    return await self.receive_message()
+
+def generate_response(self, prompt: str, max_length: int = 512) -> str:
+    """Generate response using Hugging Face model"""
+    try:
+        # For conversation models, format appropriately
+        if "DialoGPT" in self.model_name:
+            # DialoGPT expects conversation format
+            inputs = self.generator.tokenizer.encode(prompt + self.generator.tokenizer.eos_token, return_tensors='pt')
+            with torch.no_grad():
+                outputs = self.generator.model.generate(
+                    inputs, 
+                    max_length=max_length,
+                    num_return_sequences=1,
+                    temperature=0.7,
+                    pad_token_id=self.generator.tokenizer.eos_token_id,
+                    do_sample=True
+                )
+            response = self.generator.tokenizer.decode(outputs[:, inputs.shape[-1]:][0], skip_special_tokens=True)
+        else:
+            # For general text generation models
+            response = self.generator(
+                prompt,
+                max_length=max_length,
+                num_return_sequences=1,
+                temperature=0.7,
+                do_sample=True
+            )[0]['generated_text']
+            
+            # Remove the original prompt from response
+            if response.startswith(prompt):
+                response = response[len(prompt):].strip()
+        
+        return response
+    except Exception as e:
+        return f"Error generating response: {e}"
+
+async def chat_with_tools(self):
+    """Interactive chat session with tool calling capability"""
+    print("\n=== Chat with Oracle Database Tools ===")
+    print("Available commands:")
+    print("- Ask questions about your Oracle database")
+    print("- Type 'tools' to see available tools")
+    print("- Type 'quit' to exit")
+    print("=" * 50)
+    
+    while True:
+        user_input = input("\nUser: ").strip()
+        
+        if user_input.lower() == 'quit':
+            break
+        elif user_input.lower() == 'tools':
+            print("Available tools:")
+            for tool_name, tool_info in self.tools.items():
+                print(f"- {tool_name}: {tool_info.get('description', 'No description')}")
+            continue
+        
+        # Check if user is asking for database query
+        if any(keyword in user_input.lower() for keyword in ['query', 'database', 'select', 'oracle', 'sql', 'table']):
+            # Try to extract query parameters (this is a simple example)
+            # In a real implementation, you'd use the LLM to parse this
+            if 'query' in user_input.lower() and 'sql_request_tracking' in user_input.lower():
+                try:
+                    result = await self.call_tool("query_sql_list_all", {
+                        "sql_query": "SELECT * FROM sql_request_tracking LIMIT 10"
+                    })
+                    
+                    if "result" in result:
+                        print(f"\nDatabase Result: {json.dumps(result['result'], indent=2)}")
+                    else:
+                        print(f"Tool call result: {result}")
+                    
+                    continue
+                except Exception as e:
+                    print(f"Error calling tool: {e}")
+        
+        # Generate response using the LLM
+        enhanced_prompt = f"""
+        You are an AI assistant with access to Oracle database tools. The user asked: "{user_input}"
+        
+        Available tools: {list(self.tools.keys())}
+        
+        Respond helpfully about database queries or general questions:
+        """
+        
+        response = self.generate_response(enhanced_prompt)
+        print(f"\nAssistant: {response}")
+
+async def cleanup(self):
+    """Clean up resources"""
+    if self.server_process:
+        self.server_process.terminate()
+        await self.server_process.wait()
+```
+
+async def main():
+# You can change this to other Hugging Face models like:
+# “microsoft/DialoGPT-small”, “gpt2”, “facebook/blenderbot-400M-distill”, etc.
+model_name = “microsoft/DialoGPT-medium”
+
+```
+client = MCPClient(model_name)
+
+# Path to your MCP server file
+server_path = "your_oracle_mcp_server.py"  # Update this path
+
+try:
+    success = await client.start_mcp_server(server_path)
+    if success:
+        await client.chat_with_tools()
+    else:
+        print("Failed to start MCP server")
+finally:
+    await client.cleanup()
+```
+
+if **name** == “**main**”:
+asyncio.run(main())
