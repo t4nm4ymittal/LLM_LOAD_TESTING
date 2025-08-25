@@ -1,0 +1,328 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+from transformers import AutoTokenizer, AutoModel, AutoConfig
+import json
+import sqlite3
+from typing import List, Dict, Tuple, Optional
+import re
+
+class TextToSQLDataset(Dataset):
+“”“Dataset class for text-to-SQL training data”””
+
+```
+def __init__(self, data_path: str, tokenizer, max_length: int = 512):
+    self.tokenizer = tokenizer
+    self.max_length = max_length
+    self.data = self.load_data(data_path)
+
+def load_data(self, data_path: str) -> List[Dict]:
+    """Load training data from JSON file"""
+    with open(data_path, 'r') as f:
+        return json.load(f)
+
+def __len__(self):
+    return len(self.data)
+
+def __getitem__(self, idx):
+    item = self.data[idx]
+    
+    # Create input text with schema context
+    schema_info = self.format_schema(item.get('schema', {}))
+    input_text = f"Schema: {schema_info}\nQuestion: {item['question']}"
+    
+    # Tokenize input and target
+    inputs = self.tokenizer(
+        input_text,
+        max_length=self.max_length,
+        padding='max_length',
+        truncation=True,
+        return_tensors='pt'
+    )
+    
+    targets = self.tokenizer(
+        item['sql'],
+        max_length=self.max_length,
+        padding='max_length',
+        truncation=True,
+        return_tensors='pt'
+    )
+    
+    return {
+        'input_ids': inputs['input_ids'].squeeze(),
+        'attention_mask': inputs['attention_mask'].squeeze(),
+        'target_ids': targets['input_ids'].squeeze(),
+        'target_attention_mask': targets['attention_mask'].squeeze()
+    }
+
+def format_schema(self, schema: Dict) -> str:
+    """Format database schema for model input"""
+    if not schema:
+        return ""
+    
+    schema_parts = []
+    for table_name, columns in schema.items():
+        col_info = ", ".join([f"{col['name']} ({col['type']})" for col in columns])
+        schema_parts.append(f"Table {table_name}: {col_info}")
+    
+    return " | ".join(schema_parts)
+```
+
+class TextToSQLModel(nn.Module):
+“”“Text-to-SQL model based on transformer architecture”””
+
+```
+def __init__(self, model_name: str = "microsoft/DialoGPT-medium", vocab_size: int = 50257):
+    super(TextToSQLModel, self).__init__()
+    
+    # Load pre-trained transformer
+    self.config = AutoConfig.from_pretrained(model_name)
+    self.encoder = AutoModel.from_pretrained(model_name)
+    
+    # Decoder layers for SQL generation
+    self.decoder = nn.TransformerDecoder(
+        nn.TransformerDecoderLayer(
+            d_model=self.config.hidden_size,
+            nhead=self.config.num_attention_heads,
+            dim_feedforward=self.config.intermediate_size,
+            dropout=0.1
+        ),
+        num_layers=6
+    )
+    
+    # Output projection to vocabulary
+    self.output_projection = nn.Linear(self.config.hidden_size, vocab_size)
+    self.dropout = nn.Dropout(0.1)
+
+def forward(self, input_ids, attention_mask, target_ids=None):
+    # Encode input
+    encoder_outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
+    encoder_hidden_states = encoder_outputs.last_hidden_state
+    
+    if target_ids is not None:
+        # Training mode - teacher forcing
+        target_embeddings = self.encoder.embeddings(target_ids)
+        decoder_output = self.decoder(
+            target_embeddings.transpose(0, 1),
+            encoder_hidden_states.transpose(0, 1)
+        ).transpose(0, 1)
+    else:
+        # Inference mode - autoregressive generation
+        batch_size = input_ids.size(0)
+        max_length = 256  # Maximum SQL length
+        
+        # Start with special token
+        generated = torch.zeros(batch_size, 1, dtype=torch.long, device=input_ids.device)
+        
+        for _ in range(max_length):
+            target_embeddings = self.encoder.embeddings(generated)
+            decoder_output = self.decoder(
+                target_embeddings.transpose(0, 1),
+                encoder_hidden_states.transpose(0, 1)
+            ).transpose(0, 1)
+            
+            next_token_logits = self.output_projection(decoder_output[:, -1, :])
+            next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+            generated = torch.cat([generated, next_token], dim=1)
+            
+            # Stop if all sequences generated end token
+            if torch.all(next_token == 50256):  # EOS token
+                break
+        
+        decoder_output = self.output_projection(
+            self.decoder(
+                self.encoder.embeddings(generated).transpose(0, 1),
+                encoder_hidden_states.transpose(0, 1)
+            ).transpose(0, 1)
+        )
+    
+    logits = self.output_projection(self.dropout(decoder_output))
+    return logits
+```
+
+class TextToSQLTrainer:
+“”“Training class for the text-to-SQL model”””
+
+```
+def __init__(self, model, tokenizer, device='cuda' if torch.cuda.is_available() else 'cpu'):
+    self.model = model.to(device)
+    self.tokenizer = tokenizer
+    self.device = device
+    self.optimizer = optim.AdamW(model.parameters(), lr=1e-4)
+    self.criterion = nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id)
+
+def train_epoch(self, dataloader):
+    self.model.train()
+    total_loss = 0
+    
+    for batch in dataloader:
+        # Move batch to device
+        input_ids = batch['input_ids'].to(self.device)
+        attention_mask = batch['attention_mask'].to(self.device)
+        target_ids = batch['target_ids'].to(self.device)
+        
+        # Forward pass
+        logits = self.model(input_ids, attention_mask, target_ids[:, :-1])
+        
+        # Calculate loss
+        loss = self.criterion(
+            logits.reshape(-1, logits.size(-1)),
+            target_ids[:, 1:].reshape(-1)
+        )
+        
+        # Backward pass
+        self.optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+        self.optimizer.step()
+        
+        total_loss += loss.item()
+    
+    return total_loss / len(dataloader)
+
+def generate_sql(self, question: str, schema: Dict = None) -> str:
+    """Generate SQL from natural language question"""
+    self.model.eval()
+    
+    # Format input
+    schema_info = self.format_schema(schema) if schema else ""
+    input_text = f"Schema: {schema_info}\nQuestion: {question}"
+    
+    # Tokenize
+    inputs = self.tokenizer(
+        input_text,
+        max_length=512,
+        padding='max_length',
+        truncation=True,
+        return_tensors='pt'
+    ).to(self.device)
+    
+    with torch.no_grad():
+        # Generate SQL
+        logits = self.model(inputs['input_ids'], inputs['attention_mask'])
+        predicted_ids = torch.argmax(logits, dim=-1)
+        
+        # Decode generated SQL
+        sql = self.tokenizer.decode(predicted_ids[0], skip_special_tokens=True)
+        
+        # Clean up generated SQL
+        sql = self.clean_sql(sql)
+    
+    return sql
+
+def format_schema(self, schema: Dict) -> str:
+    """Format database schema for model input"""
+    if not schema:
+        return ""
+    
+    schema_parts = []
+    for table_name, columns in schema.items():
+        col_info = ", ".join([f"{col['name']} ({col['type']})" for col in columns])
+        schema_parts.append(f"Table {table_name}: {col_info}")
+    
+    return " | ".join(schema_parts)
+
+def clean_sql(self, sql: str) -> str:
+    """Clean and format generated SQL"""
+    # Remove extra whitespace
+    sql = re.sub(r'\s+', ' ', sql).strip()
+    
+    # Basic SQL formatting
+    sql_keywords = ['SELECT', 'FROM', 'WHERE', 'GROUP BY', 'HAVING', 'ORDER BY', 'LIMIT']
+    for keyword in sql_keywords:
+        sql = re.sub(f'\\b{keyword.lower()}\\b', keyword, sql, flags=re.IGNORECASE)
+    
+    return sql
+```
+
+class MCPTextToSQLHelper:
+“”“MCP Helper class for text-to-SQL functionality”””
+
+```
+def __init__(self, model_path: str = None):
+    self.tokenizer = AutoTokenizer.from_pretrained("microsoft/DialoGPT-medium")
+    self.tokenizer.pad_token = self.tokenizer.eos_token
+    
+    if model_path and os.path.exists(model_path):
+        # Load pre-trained model
+        self.model = TextToSQLModel()
+        self.model.load_state_dict(torch.load(model_path, map_location='cpu'))
+    else:
+        # Initialize new model
+        self.model = TextToSQLModel()
+    
+    self.trainer = TextToSQLTrainer(self.model, self.tokenizer)
+
+def process_user_query(self, query: str, database_schema: Dict = None) -> Dict:
+    """Process user query and return SQL"""
+    try:
+        sql = self.trainer.generate_sql(query, database_schema)
+        
+        return {
+            "success": True,
+            "sql": sql,
+            "query": query,
+            "schema_used": database_schema is not None
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "query": query
+        }
+
+def train_model(self, training_data_path: str, epochs: int = 10):
+    """Train the model on custom data"""
+    dataset = TextToSQLDataset(training_data_path, self.tokenizer)
+    dataloader = DataLoader(dataset, batch_size=8, shuffle=True)
+    
+    print(f"Starting training for {epochs} epochs...")
+    for epoch in range(epochs):
+        loss = self.trainer.train_epoch(dataloader)
+        print(f"Epoch {epoch+1}/{epochs}, Loss: {loss:.4f}")
+
+def save_model(self, path: str):
+    """Save trained model"""
+    torch.save(self.model.state_dict(), path)
+    print(f"Model saved to {path}")
+```
+
+# Example usage and initialization
+
+def initialize_mcp_helper():
+“”“Initialize the MCP helper”””
+helper = MCPTextToSQLHelper()
+
+```
+# Example schema
+example_schema = {
+    "customers": [
+        {"name": "id", "type": "INTEGER"},
+        {"name": "name", "type": "TEXT"},
+        {"name": "email", "type": "TEXT"}
+    ],
+    "orders": [
+        {"name": "id", "type": "INTEGER"},
+        {"name": "customer_id", "type": "INTEGER"},
+        {"name": "amount", "type": "DECIMAL"},
+        {"name": "order_date", "type": "DATE"}
+    ]
+}
+
+return helper, example_schema
+```
+
+if **name** == “**main**”:
+# Example usage
+helper, schema = initialize_mcp_helper()
+
+```
+# Process a user query
+result = helper.process_user_query(
+    "Show me all customers who have placed orders over $100",
+    schema
+)
+
+print("Result:", result)
+```
